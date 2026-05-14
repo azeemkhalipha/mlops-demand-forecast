@@ -1,0 +1,3 @@
+cat > ~/mlops-demand-forecast/.env.example << 'EOF'
+PROJECT_ROOT=/your/path/to/mlops-demand-forecast
+EOF
