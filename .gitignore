@@ -1,0 +1,11 @@
+cat > ~/mlops-demand-forecast/.gitignore << 'EOF'
+.env
+.DS_Store
+__pycache__/
+*.pyc
+data/raw/*.csv
+data/features/
+*.parquet
+.ipynb_checkpoints/
+mlruns/
+EOF
