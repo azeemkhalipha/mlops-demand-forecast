@@ -1,0 +1,11 @@
+.env
+.git
+.gitignore
+__pycache__
+*.pyc
+*.ipynb
+data/
+notebooks/
+tests/
+airflow/
+.DS_Store

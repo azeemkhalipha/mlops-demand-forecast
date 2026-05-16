@@ -1,47 +1,24 @@
+import sys
 import os
-import mlflow
-import pandas as pd
-import numpy as np
+
+# Works both locally and inside Docker
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+from pydantic import BaseModel, Field
 from typing import List
-from dotenv import load_dotenv
+from model_loader import model_loader
 
-load_dotenv("/Users/azeemkhalipha/mlops-demand-forecast/.env")
+FEATURE_COLS = [
+    "qty_lag_1", "qty_lag_7", "qty_lag_30",
+    "qty_rolling_avg_7", "qty_rolling_avg_30",
+    "qty_rolling_std_7", "daily_revenue"
+]
 
-PROJECT_ROOT = os.getenv("PROJECT_ROOT")
-MLFLOW_PATH  = f"file://{PROJECT_ROOT}/mlruns"
-
-# Initialise FastAPI app
-app = FastAPI(
-    title="Demand Forecast API",
-    description="Predicts next day product demand using ML",
-    version="1.0.0"
-)
-
-# Load model at startup
-mlflow.set_tracking_uri(MLFLOW_PATH)
-# Load directly from experiment runs instead of registry
-runs_path = f"{PROJECT_ROOT}/mlruns"
-client = mlflow.MlflowClient(tracking_uri=MLFLOW_PATH)
-
-# Get best run automatically
-experiment = client.get_experiment_by_name("demand_forecasting")
-runs = client.search_runs(
-    experiment_ids=[experiment.experiment_id],
-    order_by=["metrics.rmse ASC"],
-    max_results=1
-)
-
-best_run_id = runs[0].info.run_id
-model_uri   = f"{MLFLOW_PATH}/{experiment.experiment_id}/{best_run_id}/artifacts/model"
-model       = mlflow.pyfunc.load_model(model_uri)
-print(f"Loaded model from run: {best_run_id}")
-print("Model loaded successfully")
-
-
-# ── Request/Response schemas ───────────────────────────────────────────────────
-class PredictRequest(BaseModel):
+class PredictionRequest(BaseModel):
     qty_lag_1:           float
     qty_lag_7:           float
     qty_lag_30:          float
@@ -50,47 +27,81 @@ class PredictRequest(BaseModel):
     qty_rolling_std_7:   float
     daily_revenue:       float
 
-class BatchPredictRequest(BaseModel):
-    records: List[PredictRequest]
+class PredictionResponse(BaseModel):
+    predicted_quantity: float
+    model_version:      str
+    status:             str
 
-class PredictResponse(BaseModel):
-    predicted_demand: float
-    model_version:    str = "1"
+class BatchPredictionRequest(BaseModel):
+    inputs: List[PredictionRequest]
 
-class BatchPredictResponse(BaseModel):
-    predictions:   List[float]
-    record_count:  int
-    model_version: str = "1"
+class BatchPredictionResponse(BaseModel):
+    predictions: List[float]
+    count:       int
+    status:      str
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Starting up — loading model...")
+    model_loader.load()
+    yield
+    print("Shutting down...")
 
-# ── Endpoints ──────────────────────────────────────────────────────────────────
-@app.get("/")
-def root():
-    return {"status": "running", "model": "demand_forecast_model", "version": "1"}
+app = FastAPI(
+    title="Demand Forecast API",
+    description="MLOps demand forecasting model serving API",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 @app.get("/health")
-def health():
-    return {"status": "healthy"}
+def health_check():
+    return {
+        "status":        "healthy",
+        "model_loaded":  model_loader.is_loaded,
+        "model_version": model_loader.model_version or "none"
+    }
 
-@app.post("/predict", response_model=PredictResponse)
-def predict(request: PredictRequest):
+@app.post("/predict", response_model=PredictionResponse)
+def predict(request: PredictionRequest):
     try:
-        data = pd.DataFrame([request.dict()])
-        prediction = model.predict(data)[0]
-        prediction = max(0, round(float(prediction), 2))
-        return PredictResponse(predicted_demand=prediction)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/batch_predict", response_model=BatchPredictResponse)
-def batch_predict(request: BatchPredictRequest):
-    try:
-        data = pd.DataFrame([r.dict() for r in request.records])
-        predictions = model.predict(data)
-        predictions = [max(0, round(float(p), 2)) for p in predictions]
-        return BatchPredictResponse(
-            predictions=predictions,
-            record_count=len(predictions)
+        features   = {col: getattr(request, col) for col in FEATURE_COLS}
+        prediction = model_loader.predict(features)
+        return PredictionResponse(
+            predicted_quantity=prediction,
+            model_version=model_loader.model_version,
+            status="success"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/batch_predict", response_model=BatchPredictionResponse)
+def batch_predict(request: BatchPredictionRequest):
+    try:
+        features_list = [
+            {col: getattr(item, col) for col in FEATURE_COLS}
+            for item in request.inputs
+        ]
+        predictions = model_loader.batch_predict(features_list)
+        return BatchPredictionResponse(
+            predictions=predictions,
+            count=len(predictions),
+            status="success"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/")
+def root():
+    return {
+        "message": "Demand Forecast API is running",
+        "docs":    "/docs",
+        "health":  "/health"
+    }
