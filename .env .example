@@ -1,3 +1,5 @@
 cat > ~/mlops-demand-forecast/.env.example << 'EOF'
 PROJECT_ROOT=/your/path/to/mlops-demand-forecast
+MODEL_NAME=demand_forecast_model
+MODEL_VERSION=1
 EOF
